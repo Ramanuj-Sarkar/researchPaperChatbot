@@ -2,15 +2,19 @@
 # in the "Document AI: From OCR to Agentic Doc Extraction" course on DeepLearning.ai.
 # More information can be found at:
 # https://github.com/https-deeplearning-ai/sc-landingai
-import boto3, os, json
-from dotenv import load_dotenv
-import pandas as pd
-import lambda_helpers
 from datetime import datetime
+
+import boto3
+import json
+import os
 import strands
+from strands import Agent
 from bedrock_agentcore.memory import MemoryClient
 from bedrock_agentcore.memory.integrations.strands.config import AgentCoreMemoryConfig
 from bedrock_agentcore.memory.integrations.strands.session_manager import AgentCoreMemorySessionManager
+from dotenv import load_dotenv
+
+import lambda_helpers
 from visual_grounding_helper import (
     extract_chunk_id_from_markdown,
     extract_chunk_image  # Using extract_chunk_image for cropped images
@@ -128,8 +132,6 @@ for kb in kb_response.get("knowledgeBaseSummaries", []):
         print(f"      Status: {ds['status']}")
 
 
-
-
 response = bedrock_agent.start_ingestion_job(
     knowledgeBaseId=os.getenv("BEDROCK_KB_ID"),
     dataSourceId=os.getenv("DATA_SOURCE_ID")
@@ -153,10 +155,10 @@ def search_knowledge_base(query: str) -> str:
         # 1. Query the knowledge base using hybrid search
 
         # Create runtime client if needed
-        bedrock_agent_runtime = session.client("bedrock-agent-runtime")
+        this_bedrock_agent_runtime = session.client("bedrock-agent-runtime")
 
         # Query the Knowledge Base with 5 results as requested
-        response = bedrock_agent_runtime.retrieve(
+        this_response = this_bedrock_agent_runtime.retrieve(
             knowledgeBaseId=kb_id,
             retrievalQuery={"text": query},
             retrievalConfiguration={
@@ -168,17 +170,17 @@ def search_knowledge_base(query: str) -> str:
         )
 
         # Get results and sort by score (higher score = more relevant)
-        raw_results = response.get("retrievalResults", [])
+        raw_results = this_response.get("retrievalResults", [])
         sorted_results = sorted(raw_results, key=lambda x: x.get("score", 0), reverse=True)
 
         results = []
         seen_chunk_ids = set()  # Track seen chunk IDs to avoid duplicates
 
         # 2. For each result, get the location and check if this is a chunk JSON file from medical_chunks folder
-        for result in sorted_results:
-            content = result.get("content", {}).get("text", "")
-            score = result.get("score", 0)
-            location = result.get("location", {})
+        for this_result in sorted_results:
+            content = this_result.get("content", {}).get("text", "")
+            score = this_result.get("score", 0)
+            location = this_result.get("location", {})
 
             # Get source file from S3 location
             s3_location = location.get("s3Location", {})
@@ -187,7 +189,6 @@ def search_knowledge_base(query: str) -> str:
 
             # Initialize variables
             chunk_id = None
-            visual_info = None
             cropped_image_url = None
             chunk_type = "text"
             page = None
@@ -211,7 +212,7 @@ def search_knowledge_base(query: str) -> str:
                     source_document = chunk_data.get('source_document', '')
 
                     # The text might be in the chunk data or in the content
-                    text = chunk_data.get('text', content)
+                    # text = chunk_data.get('text', content)
 
                     # Skip if we've already seen this chunk ID
                     if chunk_id and chunk_id in seen_chunk_ids:
@@ -234,12 +235,12 @@ def search_knowledge_base(query: str) -> str:
                                 highlight=True,
                                 padding=10
                             )
-                        except:
-                            pass  # PDF not found
+                        except Exception as e1:
+                            print(f"{e1}; PDF not found")  # PDF not found
 
-                except Exception as e:
-                    # Fallback if can't parse chunk file
-                    pass
+                except Exception as e2:
+                    # Fallback if it can't parse chunk file
+                    print(f"{e2}; fallback if it can't parse chunk file")
             else:
                 # Not a chunk file, try to extract chunk ID from markdown
                 chunk_id = extract_chunk_id_from_markdown(content)
@@ -293,10 +294,10 @@ def search_knowledge_base(query: str) -> str:
         else:
             return f"No documents found for query: '{query}'. The knowledge base may be empty or still processing."
 
-    except Exception as e:
-        error_msg = str(e)
+    except Exception as e1:
+        error_msg = str(e1)
         if "ResourceNotFoundException" in error_msg:
-            return f"Error: Knowledge base {kb_id} not found. Please verify the BEDROCK_KB_ID is correct."
+            return f"Error: Knowledge base not found. Please verify the BEDROCK_KB_ID is correct."
         elif "ValidationException" in error_msg:
             return f"Error: Invalid query or configuration. Details: {error_msg}"
         else:
@@ -402,22 +403,94 @@ else:
     session_manager = None
     print("Agent will run without memory")
 
+# Create the agent with memory and tools
+medical_agent = Agent(
+    model=os.getenv("BEDROCK_MODEL_ID"),
+    name="Medical Document Analyzer with Memory",
+    description="Expert agent for medical documents with conversation memory",
+    system_prompt="""
+You are a medical document analysis assistant with memory capabilities and visual grounding support.
+You remember our conversations, user preferences, and important facts.
 
+Your capabilities:
+- Search and analyze medical documents from the knowledge base
+- Provide visual grounding information showing exact locations in documents
+- Display page numbers and bounding box coordinates when available
+- Reference annotated images that highlight specific document regions
+- Remember user preferences and conversation history
+- Provide personalized, contextual responses
+- Learn from interactions to improve future responses
 
+IMPORTANT: When you receive search results that include visual grounding information, you MUST include:
+- Page numbers where information was found
+- Location coordinates showing exact position on the page
+- Annotated image URLs that show highlighted text regions
 
+When search results contain these visual markers, preserve them in your response.
+Do not summarize away the visual grounding details.
 
+Visual grounding format to preserve:
+- **Page:** [number] - shows which page contains the information
+- **Location:** [coordinates] - shows exact position on the page
+- **Annotated Image:** [URL] - provides visual highlight of the referenced text
 
+You have access to medical documents about common cold, treatments, and symptoms.
+Always provide evidence-based insights from the documents with visual references when available.
+When visual grounding is provided in search results, include it in your response.
+Include visual grounding to help users see exactly where information comes from.
+        """,
+    session_manager=session_manager,
+    tools=[search_knowledge_base]
+)
 
+print(f"\n✅ Medical agent ready with memory and visual grounding!")
+print(f"   Model: {os.getenv('BEDROCK_MODEL_ID')}")
+print(f"   Tools: {medical_agent.tool_names}")
+print("\nThe agent will now:")
+print("   - Remember your preferences and conversation history")
+print("   - Show exact locations in documents when available")
+print("   - Provide visual grounding with page numbers and coordinates")
 
+print("=" * 70)
+print("Medical Agent - Interactive Chat with Visual Grounding")
+print("=" * 70)
+print("\nAsk questions about medicine.")
+print("Type 'exit', 'quit', or 'bye' to end the conversation.")
+print("=" * 70 + "\n")
 
+conversation_num = 0
 
+while True:
+    try:
+        user_input = input("\nYou: ").strip()
 
+        if not user_input:
+            continue
 
+        if user_input.lower() in ['exit', 'quit', 'bye', 'q']:
+            print("\n Ending conversation. Goodbye!")
+            break
 
+        conversation_num += 1
 
+        # Display the question prominently
+        print("\n" + "─" * 70)
+        print(f"Question #{conversation_num} [{datetime.now().strftime('%H:%M:%S')}]")
+        print(f"   \"{user_input}\"")
+        print("─" * 70)
 
+        print("\nAgent Response:")
+        print("   Processing...\n")
 
+        # Get and display the response
+        result = medical_agent(user_input)
+        print(result)
 
+        print("\n" + "=" * 70)
 
-
-
+    except KeyboardInterrupt:
+        print("\n\n Conversation interrupted. Goodbye!")
+        break
+    except Exception as e:
+        print(f"\n Error: {e}")
+        print("Please try again or type 'exit' to quit.")

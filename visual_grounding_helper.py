@@ -3,17 +3,15 @@ Visual Grounding Helper Functions
 Utilities for creating annotated images with bounding boxes from document chunks
 """
 
-import json
-import boto3
-from typing import Dict, List, Optional, Tuple
 import io
 from pathlib import Path
+from typing import Dict, List, Optional
+import pymupdf  # PyMuPDF for PDF rendering
+from PIL import Image, ImageDraw
+import re
 
 # Check if dynamic cropping dependencies are available
 try:
-    import fitz  # PyMuPDF for PDF rendering
-    from PIL import Image, ImageDraw, ImageFont
-
     DYNAMIC_CROPPING_ENABLED = True
 except ImportError:
     DYNAMIC_CROPPING_ENABLED = False
@@ -42,11 +40,12 @@ def render_pdf_page(pdf_bytes: bytes, page_num: int, dpi: int = 150):
         return None, None, None
 
     try:
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
         page = doc[page_num]
-        mat = fitz.Matrix(dpi / 72.0, dpi / 72.0)
+        mat = pymupdf.Matrix(dpi / 72.0, dpi / 72.0)
         pix = page.get_pixmap(matrix=mat)
-        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        size_tuple = (int(pix.width), int(pix.height))
+        img = Image.frombytes("RGB", size_tuple, pix.samples)
         page_width, page_height = page.rect.width, page.rect.height
         doc.close()
         return img, page_width, page_height
@@ -81,7 +80,7 @@ def extract_chunk_image(
         padding: Extra pixels around bbox (default 10)
 
     Returns:
-        S3 presigned URL of the cropped chunk image or None
+        S3 pre-signed URL of the cropped chunk image or None
     """
     if not DYNAMIC_CROPPING_ENABLED:
         print("⚠️ Dynamic cropping disabled. Install PyMuPDF and Pillow.")
@@ -92,15 +91,15 @@ def extract_chunk_image(
         image_key = f"output/medical_chunk_images/{source_document}_{chunk_id}.png"
         try:
             s3_client.head_object(Bucket=bucket, Key=image_key)
-            # Image exists, return presigned URL
-            presigned_url = s3_client.generate_presigned_url(
+            # Image exists, return pre-signed URL
+            pre_signed_url = s3_client.generate_presigned_url(
                 'get_object',
                 Params={'Bucket': bucket, 'Key': image_key},
                 ExpiresIn=3600
             )
-            return presigned_url
-        except:
-            pass  # Image doesn't exist, create it
+            return pre_signed_url
+        except Exception:
+            print("Image doesn't exist, create it")
 
         # Download PDF from S3
         response = s3_client.get_object(Bucket=bucket, Key=source_pdf_key)
@@ -164,14 +163,14 @@ def extract_chunk_image(
             ContentType='image/png'
         )
 
-        # Generate presigned URL
-        presigned_url = s3_client.generate_presigned_url(
+        # Generate pre-signed URL
+        pre_signed_url = s3_client.generate_presigned_url(
             'get_object',
             Params={'Bucket': bucket, 'Key': image_key},
             ExpiresIn=3600
         )
 
-        return presigned_url
+        return pre_signed_url
 
     except Exception as e:
         print(f"Error extracting chunk image: {e}")
@@ -206,13 +205,13 @@ def create_annotated_image_from_pdf(
     """
     try:
         # Open PDF with PyMuPDF
-        pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
+        pdf_document = pymupdf.open(stream=pdf_bytes, filetype="pdf")
 
         # Get the specific page (0-indexed in PyMuPDF)
         page = pdf_document[page_num - 1] if page_num > 0 else pdf_document[page_num]
 
         # Render page to image at specified DPI
-        mat = fitz.Matrix(dpi / 72.0, dpi / 72.0)
+        mat = pymupdf.Matrix(dpi / 72.0, dpi / 72.0)
         pix = page.get_pixmap(matrix=mat)
         img_data = pix.tobytes("png")
 
@@ -224,7 +223,7 @@ def create_annotated_image_from_pdf(
         img_width, img_height = img.size
 
         # Define colors based on chunk type (matching ADE chunk types)
-        CHUNK_TYPE_COLORS = {
+        chunk_type_colors = {
             "text": (40, 167, 69),  # Green
             "table": (0, 123, 255),  # Blue
             "marginalia": (111, 66, 193),  # Purple
@@ -238,7 +237,7 @@ def create_annotated_image_from_pdf(
             "default": (128, 128, 128)  # Gray for unknown types
         }
         # Get RGB color based on chunk type
-        rgb_color = CHUNK_TYPE_COLORS.get(chunk_type.lower(), CHUNK_TYPE_COLORS["default"])
+        rgb_color = chunk_type_colors.get(chunk_type.lower(), chunk_type_colors["default"])
 
         # Draw bounding boxes
         for bbox in bounding_boxes:
@@ -251,10 +250,10 @@ def create_annotated_image_from_pdf(
                 bottom = float(bbox.get('bottom', 1))
 
                 # Ensure coordinates are in 0-1 range
-                left = max(0, min(1, left))
-                top = max(0, min(1, top))
-                right = max(0, min(1, right))
-                bottom = max(0, min(1, bottom))
+                left = max(0, min(1, int(left)))
+                top = max(0, min(1, int(top)))
+                right = max(0, min(1, int(right)))
+                bottom = max(0, min(1, int(bottom)))
 
                 # Convert to pixel coordinates
                 x1 = int(left * img_width)
@@ -297,18 +296,18 @@ def create_annotated_image_from_pdf(
 
         pdf_document.close()
 
-        # Generate presigned URL for the image
-        presigned_url = s3_client.generate_presigned_url(
+        # Generate pre-signed URL for the image
+        pre_signed_url = s3_client.generate_presigned_url(
             'get_object',
             Params={'Bucket': bucket, 'Key': output_s3_key},
             ExpiresIn=3600  # URL valid for 1 hour
         )
 
-        return presigned_url
+        return pre_signed_url
 
     except Exception as e:
         print(f"Error creating annotated image: {e}")
-        return None
+        return ""
 
 
 def get_or_create_annotated_image(
@@ -329,6 +328,7 @@ def get_or_create_annotated_image(
         source_pdf_key: S3 key of the source PDF
         chunk_id: Unique chunk identifier
         grounding_info: Dictionary with 'page' and 'box' information
+        chunk_type: the type of chunk it is
         force_recreate: Force recreation even if image exists
 
     Returns:
@@ -343,15 +343,15 @@ def get_or_create_annotated_image(
     if not force_recreate:
         try:
             s3_client.head_object(Bucket=bucket, Key=annotation_key)
-            # Generate presigned URL for existing annotation
-            presigned_url = s3_client.generate_presigned_url(
+            # Generate pre-signed URL for existing annotation
+            pre_signed_url = s3_client.generate_presigned_url(
                 'get_object',
                 Params={'Bucket': bucket, 'Key': annotation_key},
                 ExpiresIn=3600  # URL valid for 1 hour
             )
-            return presigned_url
-        except:
-            pass  # File doesn't exist, create it
+            return pre_signed_url
+        except Exception:
+            print("File doesn't exist, create it")
 
     # Download source PDF
     try:
@@ -379,15 +379,14 @@ def get_or_create_annotated_image(
 
 def extract_chunk_id_from_markdown(markdown_text: str) -> Optional[str]:
     """
-    Extract chunk ID from markdown text containing anchor tags
+    Extract chunk ID from Markdown text containing anchor tags
 
     Args:
-        markdown_text: Markdown text with anchor tags like <a id="chunk_123"></a>
+        markdown_text: Markdown text with anchor tags like <div id="chunk_123"></div>
 
     Returns:
         Chunk ID or None if not found
     """
-    import re
 
     # Look for anchor tags with IDs
     pattern = r'<a id=["\'](.*?)["\']></a>'

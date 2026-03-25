@@ -3,14 +3,12 @@ Lambda Deployment Helper Functions
 Utilities for deploying and managing AWS Lambda functions
 """
 
-import boto3
 import json
-import time
-import subprocess
-import zipfile
 import os
+import subprocess
+import time
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional
 
 
 def create_or_update_lambda_role(
@@ -135,7 +133,7 @@ def deploy_lambda_function(
         runtime: str = "python3.10",
         timeout: int = 900,
         memory_size: int = 3008,
-        architectures: List[str] = ["x86_64"]
+        architectures: List[str] = None
 ) -> Dict:
     """
     Deploy or update Lambda function
@@ -143,6 +141,10 @@ def deploy_lambda_function(
     Returns:
         Function configuration dict
     """
+
+    if architectures is None:
+        architectures = ["x86_64"]
+
     print(f"🚀 Deploying Lambda function: {function_name}")
 
     # Read zip file
@@ -204,6 +206,8 @@ def setup_s3_trigger(
     Configure S3 event trigger for Lambda
 
     Args:
+        s3_client: the S3 client
+        lambda_client: the AWS Lambda client
         bucket: S3 bucket name
         prefix: Folder prefix to trigger on
         function_name: Lambda function to trigger
@@ -261,6 +265,7 @@ def invoke_lambda_sync(
     Invoke Lambda synchronously and wait for response
 
     Args:
+        lambda_client: the AWS Lambda client
         function_name: Name of Lambda function
         payload: Optional JSON payload
         show_logs: Whether to print logs
@@ -321,6 +326,7 @@ def monitor_s3_folder(
     Monitor S3 folder for files
 
     Args:
+        s3_client: the S3 client
         bucket: S3 bucket name
         prefix: Folder prefix to monitor
         expected_count: Optional expected number of files
@@ -358,6 +364,7 @@ def upload_folder_to_s3(
     Upload entire folder to S3
 
     Args:
+        s3_client: the S3 client
         local_folder: Local folder path
         s3_prefix: S3 prefix for uploads
         bucket: S3 bucket name
@@ -485,8 +492,8 @@ def monitor_lambda_processing(
                     try:
                         file_name = message.split("Error processing ")[1].split(":")[0]
                         error_files.add(file_name)
-                    except:
-                        pass
+                    except Exception as e1:
+                        print(f"{e1}; whatever this issue in monitor_lambda_processing is")
 
                 start_time = max(start_time, event["timestamp"] + 1)
 

@@ -25,7 +25,7 @@ def ensure_s3_folders(bucket: str):
             print(f"⚠️ Could not ensure folder {folder}: {e}")
 
 
-def ade_handler(event, context):
+def ade_handler(event):
     """
     AWS Lambda handler for automatically parsing documents uploaded to S3/input/
     and saving Markdown results to S3/output/ with preserved folder structure.
